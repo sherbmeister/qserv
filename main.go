@@ -12,8 +12,8 @@ import (
 
 const (
 	ircServer = "127.0.0.1:6667"       // UnrealIRCd server
-	ircNick = "Q22"
-	ircUser = "Q22"
+	ircNick = "Q"
+	ircUser = "Q"
 	ircRealName = "QServ"
 	ircChannel = "#help"
 )

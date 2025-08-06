@@ -12,7 +12,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	passLine := "PASS qtest123 TS 6 :qserv.i-tna.org\r\n"
+	passLine := "PASS 123 TS 6 :services.emechnet.org\r\n"
 	fmt.Printf("Sending: %q\n", passLine)
 	fmt.Printf("Raw bytes: %v\n", []byte(passLine))
 

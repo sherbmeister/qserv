@@ -1,4 +1,3 @@
-// qserv_link.go
 package main
 
 import (
@@ -14,14 +13,12 @@ func sendLine(conn net.Conn, line string) {
 }
 
 func main() {
-	// Configuration
-	serverName := "qserv.i-tna.org"
+	serverName := "services.emechnet.org"
 	host := "127.0.0.1:7029"
-	// password := "abc123"
-	mySid := "42S" // 3-character server ID (must be unique on the network)
-	qUID := mySid + "AAAAAA" // 9-char UID: 3-char SID + 6-char user ID
-	now := time.Now().Unix()
-	ts := fmt.Sprintf("%d", now)
+	// password := "password123"
+	mySid := "042"
+	qUID := mySid + "AAAAAA"
+	ts := fmt.Sprintf("%d", time.Now().Unix())
 
 	// Connect
 	conn, err := net.Dial("tcp", host)
@@ -30,29 +27,26 @@ func main() {
 	}
 	defer conn.Close()
 
-	// TS6 Handshake
-    sendLine(conn, "PASS qtest123 TS 6 :qserv.i-tna.org")
-    sendLine(conn, "SERVER qserv.i-tna.org 1 :EmechNET Services")
-	sendLine(conn, fmt.Sprintf("SVINFO 6 6 0 :%s", ts))
+	// TS6 Handshake - correct UnrealIRCd 6 style
+now := time.Now().Unix()
 
-	// Inject Q
+sendLine(conn, "PASS password123 TS 6 :services.emechnet.org")
+sendLine(conn, "PROTOCTL EAUTH=services.emechnet.org SID=042")
+sendLine(conn, "SERVER services.emechnet.org 1 :EmechNET Q Service")
+sendLine(conn, fmt.Sprintf("SVINFO 6 6 0 :%d", now))
+sendLine(conn, fmt.Sprintf("SID services.emechnet.org 1 %d :042", now))
+
+
+	// Inject Q user
 	nick := "Q"
-	hostname := "qserv.i-tna.org"
 	ident := "qserv"
-	realname := "EmechNET Q Service"
-	modes := "+oS" // IRC operator + service flag
+	realname := "EmechNET Services"
+	modes := "+oS"
 	sendLine(conn, fmt.Sprintf("UID %s 1 %s %s %s %s %s %s :%s",
-		qUID, // Unique ID
-		ts,    // Timestamp
-		nick,
-		modes,
-		ident,
-		hostname,
-		serverName,
-		realname,
+		qUID, ts, nick, modes, ident, serverName, serverName, realname,
 	))
 
-	// Idle loop to keep the connection alive
+	// Keep connection open
 	buf := make([]byte, 512)
 	for {
 		n, err := conn.Read(buf)
@@ -64,4 +58,3 @@ func main() {
 		fmt.Println("<<<", line)
 	}
 }
-
