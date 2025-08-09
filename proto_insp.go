@@ -1,12 +1,9 @@
 package main
 
-import (
-	"time"
-)
+import "time"
 
 // Insp4Handshake performs the InspIRCd v4 server handshake and introduces our
-// service client (Q) *inside our own burst* so subsequent messages that refer
-// to Q (MODE/METADATA/IJOIN) are valid.
+// service client (Q) inside our own burst.
 func Insp4Handshake(l *Link) error {
 	now := time.Now().Unix()
 
@@ -29,27 +26,30 @@ func Insp4Handshake(l *Link) error {
 		return err
 	}
 
-	// 4) Introduce Q (service client) *inside* the burst.
-	// UID format (InspIRCd v4):
-	// :<sid> UID <uid> <ts> <nick> <host> <vhost> <ident> <realhost> <ip> <signon_ts> <modes> :<gecos>
-	if l.Cfg.ServiceUID == "" {
-		l.Cfg.ServiceUID = l.Cfg.SID + "AAAAAAA"
+	// 4) Introduce Q (service client) inside the burst.
+
+	// Ensure ServiceUID is 9 chars: SID (3) + 6.
+	if len(l.Cfg.ServiceUID) != 9 || l.Cfg.ServiceUID[:3] != l.Cfg.SID {
+		l.Cfg.ServiceUID = l.Cfg.SID + "AAAAAA"
 	}
-	uidts := now
+	uid := l.Cfg.ServiceUID
+	ts := now
 	signon := now
 
+	// v4 UID order (IMPORTANT):
+	// :<sid> UID <uid> <ts> <nick> <real-host> <displayed-host> <real-user> <displayed-user> <ip> <signon> <modes> :<real>
 	if err := l.SendRaw(":%s UID %s %d %s %s %s %s %s %s %d +Bk :%s",
-		l.Cfg.SID,
-		l.Cfg.ServiceUID,
-		uidts,
-		l.Cfg.QNick, // nick: e.g. "Q"
-		l.Cfg.QHost, // host
-		l.Cfg.QHost, // vhost
-		l.Cfg.QUser, // ident
-		l.Cfg.QHost, // realhost (reuse host)
-		"0.0.0.0",   // ip placeholder
-		signon,
-		l.Cfg.QReal, // gecos/realname
+		l.Cfg.SID, // prefix
+		uid,       // <uid>
+		ts,        // <ts>
+		l.Cfg.QNick,
+		l.Cfg.QHost, // real-host
+		l.Cfg.QHost, // displayed-host
+		l.Cfg.QUser, // real-user
+		l.Cfg.QUser, // displayed-user
+		"0.0.0.0",   // ip
+		signon,      // signon
+		l.Cfg.QReal, // :real/gecos
 	); err != nil {
 		return err
 	}
@@ -59,9 +59,8 @@ func Insp4Handshake(l *Link) error {
 		return err
 	}
 
-	// 6) Register handlers (core + service), being careful not to double register.
+	// 6) Register handlers
 	registerInspCoreHandlers(l)
 	registerServiceHandlers(l)
-
 	return nil
 }

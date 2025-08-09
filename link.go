@@ -46,6 +46,9 @@ func (l *Link) ConnectAndRun(ctx context.Context) error {
 
 	l.Logger.Infof("connected to %s", addr)
 
+	// ✨ IMPORTANT: reset handlers on every (re)connect BEFORE any handshake registers them
+	l.Bus = NewBus(l.Logger)
+
 	// proto handshake
 	switch strings.ToLower(l.Cfg.Protocol) {
 	case "insp4":
@@ -81,6 +84,7 @@ func (l *Link) ConnectAndRun(ctx context.Context) error {
 		case err := <-errCh:
 			return err
 		case <-tick.C:
+			// periodic ping to keep NATs happy; the server will also ping us (handled in insp_core.go)
 			_ = l.SendRaw("PING :qserv")
 		}
 	}
@@ -93,7 +97,7 @@ func (l *Link) readLoop(ctx context.Context) error {
 		line := sc.Text()
 		l.Logger.Debugf("< %s", line)
 		msg := ParseLine(line)
-		if msg != nil {
+		if msg != nil && l.Bus != nil {
 			l.Bus.Emit(l, msg)
 		}
 	}

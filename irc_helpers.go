@@ -2,61 +2,124 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 )
 
-// Send a NOTICE from our service *client* to a target (UID or #chan).
-func (l *Link) NoticeFromService(target, text string) {
-	_ = l.SendRaw(":%s NOTICE %s :%s", l.Cfg.ServiceUID, target, text)
+// ----- wire helpers you already used -----
+
+func (l *Link) SetServiceWhois(uid, text string) {
+	if uid == "" || text == "" {
+		return
+	}
+	_ = l.SendRaw(":%s METADATA %s swhois :%s", l.Cfg.SID, uid, text)
 }
 
-// Send a PRIVMSG from our service *client* to a channel.
+func (l *Link) ServerMode(uid, modes string, args ...string) {
+	if uid == "" || modes == "" {
+		return
+	}
+	line := fmt.Sprintf(":%s MODE %s %s", l.Cfg.SID, uid, modes)
+	for _, a := range args {
+		line += " " + a
+	}
+	_ = l.SendRaw(line)
+}
+
+func (l *Link) ServiceJoinWithTS(channel string, chanTS int64, opSelf bool) {
+	uid := l.Cfg.ServiceUID
+	if uid == "" {
+		return
+	}
+	membid := time.Now().UnixNano() / 1e6
+	_ = l.SendRaw(":%s IJOIN %s %d", uid, channel, membid)
+	if opSelf {
+		_ = l.SendRaw(":%s FMODE %s %d +o %s", l.Cfg.SID, channel, chanTS, uid)
+	}
+}
+
+func (l *Link) FMode(chanTS int64, channel, modes string, args ...string) {
+	line := fmt.Sprintf(":%s FMODE %s %d %s", l.Cfg.SID, channel, chanTS, modes)
+	for _, a := range args {
+		line += " " + a
+	}
+	_ = l.SendRaw(line)
+}
+
+func (l *Link) NoticeFromService(targetUID, text string) {
+	if targetUID == "" || text == "" {
+		return
+	}
+	_ = l.SendRaw(":%s NOTICE %s :%s", l.Cfg.ServiceUID, targetUID, text)
+}
+
 func (l *Link) ChanMsg(channel, text string) {
+	if channel == "" || text == "" {
+		return
+	}
 	_ = l.SendRaw(":%s PRIVMSG %s :%s", l.Cfg.ServiceUID, channel, text)
 }
 
-// Server-sourced MODE for users.
-func (l *Link) ServerMode(target, modes string, args ...string) {
-	line := fmt.Sprintf(":%s MODE %s %s", l.Cfg.SID, target, modes)
-	for _, a := range args {
-		line += " " + a
+// ----- new: account + vhost helpers -----
+
+// SetAccount attaches an account to a user and sets +r.
+func (l *Link) SetAccount(uid, account string) {
+	if uid == "" || account == "" {
+		return
 	}
-	_ = l.SendRaw(line)
+	_ = l.SendRaw(":%s METADATA %s accountname :%s", l.Cfg.SID, uid, account)
+	_ = l.SendRaw(":%s MODE %s +r", l.Cfg.SID, uid)
 }
 
-// Channel FMODE (TS-aware).
-func (l *Link) FMode(ts int64, channel, modes string, args ...string) {
-	line := fmt.Sprintf(":%s FMODE %s %d %s", l.Cfg.SID, channel, ts, modes)
-	for _, a := range args {
-		line += " " + a
+// ClearAccount removes +r and clears the accountname metadata.
+func (l *Link) ClearAccount(uid string) {
+	if uid == "" {
+		return
 	}
-	_ = l.SendRaw(line)
+	_ = l.SendRaw(":%s MODE %s -r", l.Cfg.SID, uid)
+	// Clearing accountname: send empty or omit; we’ll set a blank to be explicit
+	_ = l.SendRaw(":%s METADATA %s accountname :", l.Cfg.SID, uid)
 }
 
-// Try IJOIN (services-style), then fall back to FJOIN.
-// - IJOIN:  :<sid> IJOIN <uid> <#chan> [ts] [modes]
-// - FJOIN:  :<sid> FJOIN <#chan> <ts> + :[prefix,]UID:1
-func (l *Link) ServiceJoinWithTS(channel string, knownTS int64, giveOp bool) {
-	ts := knownTS
-	if ts == 0 {
-		ts = time.Now().Unix()
+// SetVHost sets user's displayed host (requires m_chghost).
+func (l *Link) SetVHost(uid, vhost string) {
+	if uid == "" || vhost == "" {
+		return
 	}
-	// Prefer IJOIN (if module is present it will just work)
-	if giveOp {
-		_ = l.SendRaw(":%s IJOIN %s %s %d +o", l.Cfg.SID, l.Cfg.ServiceUID, channel, ts)
-	} else {
-		_ = l.SendRaw(":%s IJOIN %s %s %d", l.Cfg.SID, l.Cfg.ServiceUID, channel, ts)
-	}
-	// Also send FJOIN as a fallback to ensure presence
-	member := l.Cfg.ServiceUID + ":1"
-	if giveOp {
-		member = "o," + member
-	}
-	_ = l.SendRaw(":%s FJOIN %s %d + :%s", l.Cfg.SID, channel, ts, member)
+	_ = l.SendRaw(":%s CHGHOST %s %s", l.Cfg.SID, uid, vhost)
 }
 
-// Add a WHOIS line using server metadata.
-// This makes /whois show something like “is a Network Service”.
-func (l *Link) SetServiceWhois(uid, line string) {
-	_ = l.SendRaw(":%s METADATA %s swhois :%s", l.Cfg.SID, uid, line)
+// ----- optional: simple nick <-> uid map (JOIN/NICK/QUIT tracking) -----
+
+var (
+	nickMu   sync.RWMutex
+	uid2nick = map[string]string{} // uid -> nick
+	nick2uid = map[string]string{} // lower(nick) -> uid
+)
+
+func setNick(uid, nick string) {
+	nickMu.Lock()
+	defer nickMu.Unlock()
+	old := uid2nick[uid]
+	if old != "" {
+		delete(nick2uid, strings.ToLower(old))
+	}
+	uid2nick[uid] = nick
+	nick2uid[strings.ToLower(nick)] = uid
+}
+
+func delNick(uid string) {
+	nickMu.Lock()
+	defer nickMu.Unlock()
+	if old, ok := uid2nick[uid]; ok {
+		delete(nick2uid, strings.ToLower(old))
+	}
+	delete(uid2nick, uid)
+}
+
+func uidFromNick(nick string) string {
+	nickMu.RLock()
+	defer nickMu.RUnlock()
+	return nick2uid[strings.ToLower(nick)]
 }
