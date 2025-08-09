@@ -28,7 +28,7 @@ func registerServiceHandlers(l *Link) {
 	_ = acl.Load()
 	_ = suspend.Load()
 
-	// Track FJOIN / JOIN / PART / QUIT / OPERTYPE (same as before) ...
+	// Track FJOIN / JOIN / PART / QUIT / OPERTYPE ...
 	l.Bus.On("FJOIN", func(l *Link, m *Message) {
 		if len(m.Params) < 3 {
 			return
@@ -56,16 +56,21 @@ func registerServiceHandlers(l *Link) {
 			}
 		}
 	})
+
+	// Keep nick map fresh
 	l.Bus.On("UID", func(_ *Link, m *Message) {
-		if len(m.Params) >= 4 {
-			setNick(m.Params[0], m.Params[3])
+		// UID <uid> <ts> <nick> ...
+		if len(m.Params) >= 3 {
+			setNick(m.Params[0], m.Params[2])
 		}
 	})
 	l.Bus.On("NICK", func(_ *Link, m *Message) {
+		// :<uid> NICK <newnick>
 		if len(m.Params) >= 1 && m.Prefix != "" {
 			setNick(m.Prefix, m.Params[0])
 		}
 	})
+
 	l.Bus.On("JOIN", func(_ *Link, m *Message) {
 		if len(m.Params) < 1 || m.Prefix == "" {
 			return
@@ -104,20 +109,58 @@ func registerServiceHandlers(l *Link) {
 
 	l.Bus.On("ENDBURST", func(l *Link, _ *Message) {
 		l.SetServiceWhois(l.Cfg.ServiceUID, "is a Network Service")
-		l.ServerMode(l.Cfg.ServiceUID, "+Bk")
+		l.SetAccountMetaOnly(l.Cfg.ServiceUID, l.Cfg.QNick) // shows “Logged in as Q” in WHOIS
+		// Hide channels in WHOIS to users who don’t share a channel (m_hidechans +I):
+		l.ServerMode(l.Cfg.ServiceUID, "+I")
+
+		// Join service channels
+		joined := make(map[string]struct{})
 		for _, ch := range serviceChans {
+			chLower := toLower(ch)
 			var ts int64
-			if cs := chans[toLower(ch)]; cs != nil {
+			if cs := chans[chLower]; cs != nil {
 				ts = cs.TS
 			}
 			l.ServiceJoinWithTS(ch, ts, true)
+			joined[chLower] = struct{}{}
 			time.Sleep(50 * time.Millisecond)
+		}
+
+		// Join all registered channels, except ones already joined
+		for _, ch := range acl.Channels() {
+			chLower := toLower(ch)
+			if _, dup := joined[chLower]; dup {
+				continue
+			}
+			var ts int64
+			if cs := chans[chLower]; cs != nil {
+				ts = cs.TS
+			}
+			l.ServiceJoinWithTS(ch, ts, true)
+			time.Sleep(30 * time.Millisecond)
 		}
 	})
 
 	// Debug tap
 	l.Bus.On("PRIVMSG", func(_ *Link, m *Message) {
 		l.Logger.Debugf("[tap] PRIVMSG from %s to %v | %q", m.Prefix, m.Params, m.Trailing)
+	})
+
+	// CTCP VERSION reply
+	l.Bus.On("PRIVMSG", func(l *Link, m *Message) {
+		if len(m.Params) == 0 {
+			return
+		}
+		text := m.Trailing
+		if text == "" {
+			return
+		}
+		if strings.EqualFold(text, "\x01VERSION\x01") {
+			from := m.Prefix
+			if from != "" {
+				l.NoticeFromService(from, "\x01VERSION qserv-v1.1.a\x01")
+			}
+		}
 	})
 
 	// Dispatcher (channel and PM)
@@ -164,11 +207,34 @@ func canControlChannel(l *Link, uid, channel string, min int) (ok bool, level in
 	if acc == "" {
 		return false, 0, false
 	}
+	acc = strings.ToLower(acc) // normalize account
+
 	level = acl.GetLevel(channel, acc)
 	owner, hasOwner := acl.Owner(channel)
-	isOwner = hasOwner && owner == acc
+	isOwner = hasOwner && strings.EqualFold(owner, acc) // case-insensitive
 	ok = isOwner || level >= min
 	return
+}
+
+// Resolve a nick to a UID that is actually in the channel.
+// 1) Try global resolver (uidFromNick) and ensure presence.
+// 2) Fallback: scan channel Seen and match case-insensitively via getNick.
+func resolveUIDInChannel(channel, token string) string {
+	ch := toLower(channel)
+
+	if uid := uidFromNick(token); uid != "" {
+		if cs := chans[ch]; cs != nil && cs.Seen[uid] {
+			return uid
+		}
+	}
+	if cs := chans[ch]; cs != nil {
+		for uid := range cs.Seen {
+			if strings.EqualFold(getNick(uid), token) {
+				return uid
+			}
+		}
+	}
+	return ""
 }
 
 // ----- Channel commands (to channel) -----
@@ -193,33 +259,40 @@ func handleChannelControl(l *Link, fromUID, channel, cmdline string) {
 
 	switch cmd {
 
-	case "op":
-		if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-			l.ChanMsg(channel, "You do not have access on "+channel+".")
-			return
-		}
-		l.FMode(cs.TS, channel, "+o", fromUID)
+	case "help":
+		l.ChanMsg(channel, "Commands: !op [nick], !deop [nick], !voice [nick], !devoice [nick], !access, !adduser <account|nick> <level>, !deluser <account|nick>, !join, !part. IRCops: !suspendchan <days> <reason>, !unsuspendchan, !purge. More: /msg Q help")
 
-	case "deop":
+	case "op", "deop", "voice", "devoice":
+		// must be logged in first
+		if _, ok := requireLoginForChannel(l, fromUID, channel); !ok {
+			return
+		}
+		// access checks
 		if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
 			l.ChanMsg(channel, "You do not have access on "+channel+".")
 			return
 		}
-		l.FMode(cs.TS, channel, "-o", fromUID)
-
-	case "voice":
-		if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-			l.ChanMsg(channel, "You do not have access on "+channel+".")
-			return
+		// optional target: default to self
+		targetTok := getOr(parts, 1, "")
+		targetUID := fromUID
+		if targetTok != "" {
+			if uid := resolveUIDInChannel(channel, targetTok); uid != "" {
+				targetUID = uid
+			} else {
+				l.ChanMsg(channel, "I can't see "+targetTok+" in "+channel+".")
+				return
+			}
 		}
-		l.FMode(cs.TS, channel, "+v", fromUID)
-
-	case "devoice":
-		if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-			l.ChanMsg(channel, "You do not have access on "+channel+".")
-			return
+		switch cmd {
+		case "op":
+			l.QChanMode(channel, "+o", targetUID)
+		case "deop":
+			l.QChanMode(channel, "-o", targetUID)
+		case "voice":
+			l.QChanMode(channel, "+v", targetUID)
+		case "devoice":
+			l.QChanMode(channel, "-v", targetUID)
 		}
-		l.FMode(cs.TS, channel, "-v", fromUID)
 
 	case "adduser":
 		// adduser <account|nick> <level>
@@ -305,14 +378,13 @@ func handleChannelControl(l *Link, fromUID, channel, cmdline string) {
 		doPurge(l, channel)
 		l.ChanMsg(channel, "Purged "+channel)
 
-	case "suspend":
-		// IRCop only: suspend #chan <days> <reason...>
+	case "suspendchan": // explicit channel suspension
 		if !opers[fromUID] {
 			l.ChanMsg(channel, "IRCop only.")
 			return
 		}
 		if len(parts) < 3 {
-			l.ChanMsg(channel, "Usage: !suspend #chan <days> <reason>")
+			l.ChanMsg(channel, "Usage: !suspendchan #chan <days> <reason>")
 			return
 		}
 		days, _ := strconv.Atoi(parts[1])
@@ -320,8 +392,31 @@ func handleChannelControl(l *Link, fromUID, channel, cmdline string) {
 		doSuspendChannel(l, channel, days, reason)
 		l.ChanMsg(channel, "Suspended "+channel+" for "+strconv.Itoa(days)+" day(s): "+reason)
 
+	case "suspend": // backward-compat alias to suspendchan
+		if !opers[fromUID] {
+			l.ChanMsg(channel, "IRCop only.")
+			return
+		}
+		if len(parts) < 3 {
+			l.ChanMsg(channel, "Usage: !suspendchan #chan <days> <reason>")
+			return
+		}
+		days, _ := strconv.Atoi(parts[1])
+		reason := strings.TrimSpace(strings.Join(parts[2:], " "))
+		doSuspendChannel(l, channel, days, reason)
+		l.ChanMsg(channel, "Suspended "+channel+" for "+strconv.Itoa(days)+" day(s): "+reason+" (alias)")
+
+	case "unsuspendchan":
+		if !opers[fromUID] {
+			l.ChanMsg(channel, "IRCop only.")
+			return
+		}
+		suspend.PurgeChan(channel)
+		_ = suspend.Save()
+		l.ChanMsg(channel, "Unsuspended "+channel)
+
 	default:
-		// ignore
+		l.ChanMsg(channel, "Unknown command. Try: !help")
 	}
 }
 
@@ -339,10 +434,23 @@ func handlePM(l *Link, fromUID, cmdline string) {
 	cmd := strings.ToLower(parts[0])
 
 	switch cmd {
+	case "help":
+		l.NoticeFromService(fromUID, "Q — Help")
+		l.NoticeFromService(fromUID, "General: ping | version")
+		l.NoticeFromService(fromUID, "Accounts: register <account> <password> | login <account> <password> | logout")
+		l.NoticeFromService(fromUID, "Channels: regchan <#channel> [owneraccount]")
+		l.NoticeFromService(fromUID, "Channel control: op|deop|voice|devoice <#channel> [nick]")
+		l.NoticeFromService(fromUID, "Access: access <#channel> | adduser <#channel> <account|nick> <level(1-500)> | deluser <#channel> <account|nick>")
+		l.NoticeFromService(fromUID, "Presence: join <#channel> | part <#channel>")
+		l.NoticeFromService(fromUID, "IRCop: suspend <account|nick> <days> <reason> | unsuspend <account|nick>")
+		l.NoticeFromService(fromUID, "IRCop (chan): suspendchan <#channel> <days> <reason> | unsuspendchan <#channel> | purge <#channel>")
+	case "version":
+		l.NoticeFromService(fromUID, "qserv-v1.1.a")
+		return
 	case "ping":
 		l.NoticeFromService(fromUID, "pong")
 
-	// account register/login/logout (unchanged)
+	// account register/login/logout
 	case "register":
 		if len(parts) < 3 {
 			l.NoticeFromService(fromUID, "Usage: register <account> <password>")
@@ -376,10 +484,10 @@ func handlePM(l *Link, fromUID, cmdline string) {
 		l.ClearAccount(fromUID)
 		l.NoticeFromService(fromUID, "You are now logged out.")
 
-	// channel registration (normal user or IRCop form)
-	case "regchannel":
+	// channel registration (rename: regchannel -> regchan)
+	case "regchan", "regchannel":
 		if len(parts) < 2 || !strings.HasPrefix(parts[1], "#") {
-			l.NoticeFromService(fromUID, "Usage: regchannel <#channel> [owneraccount]")
+			l.NoticeFromService(fromUID, "Usage: regchan <#channel> [owneraccount]")
 			return
 		}
 		channel := parts[1]
@@ -405,20 +513,129 @@ func handlePM(l *Link, fromUID, cmdline string) {
 			acl.SetOwner(channel, owner)
 			_ = acl.Save()
 			_ = qStore.Save()
-			l.NoticeFromService(fromUID, "Registered "+channel+" — owner: "+owner)
+			if cmd == "regchannel" {
+				l.NoticeFromService(fromUID, "Registered "+channel+" — owner: "+owner+" (note: command is now 'regchan')")
+			} else {
+				l.NoticeFromService(fromUID, "Registered "+channel+" — owner: "+owner)
+			}
 			return
 		}
 		l.NoticeFromService(fromUID, "Could not register "+channel+".")
 
+	// ---- Account suspension (IRCop only) ----
+	case "suspend":
+		// suspend <account|nick> <days> <reason...>    (account suspension)
+		if !opers[fromUID] {
+			l.NoticeFromService(fromUID, "IRCop only.")
+			return
+		}
+		if len(parts) < 4 {
+			l.NoticeFromService(fromUID, "Usage: suspend <account|nick> <days> <reason>")
+			return
+		}
+		acc := resolveAccountFromToken(parts[1])
+		if acc == "" {
+			l.NoticeFromService(fromUID, "Unable to resolve target to an account.")
+			return
+		}
+		days, _ := strconv.Atoi(parts[2])
+		if days < 1 {
+			days = 1
+		}
+		reason := strings.TrimSpace(strings.Join(parts[3:], " "))
+		doSuspendAccount(acc, days, reason)
+		_ = suspend.Save()
+		l.NoticeFromService(fromUID, "Suspended account "+acc+" for "+strconv.Itoa(days)+" day(s): "+reason)
+
+	case "unsuspend":
+		// unsuspend <account|nick>
+		if !opers[fromUID] {
+			l.NoticeFromService(fromUID, "IRCop only.")
+			return
+		}
+		if len(parts) < 2 {
+			l.NoticeFromService(fromUID, "Usage: unsuspend <account|nick>")
+			return
+		}
+		acc := resolveAccountFromToken(parts[1])
+		if acc == "" {
+			l.NoticeFromService(fromUID, "Unable to resolve target to an account.")
+			return
+		}
+		doUnsuspendAccount(acc)
+		_ = suspend.Save()
+		l.NoticeFromService(fromUID, "Unsuspended account "+acc)
+
+	// ---- Channel control via PM (explicit names) ----
+	case "suspendchan":
+		// suspendchan <#channel> <days> <reason...>
+		if len(parts) < 4 || !strings.HasPrefix(parts[1], "#") {
+			l.NoticeFromService(fromUID, "Usage: suspendchan <#channel> <days> <reason>")
+			return
+		}
+		if !opers[fromUID] {
+			l.NoticeFromService(fromUID, "IRCop only.")
+			return
+		}
+		channel := parts[1]
+		days, _ := strconv.Atoi(parts[2])
+		reason := strings.TrimSpace(strings.Join(parts[3:], " "))
+		doSuspendChannel(l, channel, days, reason)
+		l.NoticeFromService(fromUID, "Suspended "+channel+" for "+strconv.Itoa(days)+" day(s): "+reason)
+
+	case "unsuspendchan":
+		// unsuspendchan <#channel>
+		if len(parts) < 2 || !strings.HasPrefix(parts[1], "#") {
+			l.NoticeFromService(fromUID, "Usage: unsuspendchan <#channel>")
+			return
+		}
+		if !opers[fromUID] {
+			l.NoticeFromService(fromUID, "IRCop only.")
+			return
+		}
+		channel := parts[1]
+		suspend.PurgeChan(channel)
+		_ = suspend.Save()
+		l.NoticeFromService(fromUID, "Unsuspended "+channel)
+
 	// PM *versions* of channel controls
-	case "op", "deop", "voice", "devoice", "adduser", "deluser", "access", "join", "part", "purge", "suspend":
-		// require a channel as second arg
+	case "op", "deop", "voice", "devoice", "adduser", "deluser", "access", "join", "part", "purge":
 		if len(parts) < 2 || !strings.HasPrefix(parts[1], "#") {
 			l.NoticeFromService(fromUID, "Usage: "+cmd+" <#channel> [...args]")
 			return
 		}
 		channel := parts[1]
+
 		switch cmd {
+		case "op", "deop", "voice", "devoice":
+			if _, ok := requireLoginForChannel(l, fromUID, channel); !ok {
+				return
+			}
+			if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
+				l.NoticeFromService(fromUID, "No access on "+channel+".")
+				return
+			}
+			targetTok := getOr(parts, 2, "")
+			targetUID := fromUID
+			if targetTok != "" {
+				if uid := resolveUIDInChannel(channel, targetTok); uid != "" {
+					targetUID = uid
+				} else {
+					l.NoticeFromService(fromUID, "I can't see "+targetTok+" in "+channel+".")
+					return
+				}
+			}
+			switch cmd {
+			case "op":
+				l.QChanMode(channel, "+o", targetUID)
+			case "deop":
+				l.QChanMode(channel, "-o", targetUID)
+			case "voice":
+				l.QChanMode(channel, "+v", targetUID)
+			case "devoice":
+				l.QChanMode(channel, "-v", targetUID)
+			}
+
 		case "access":
 			entries := acl.List(channel)
 			if len(entries) == 0 {
@@ -471,42 +688,6 @@ func handlePM(l *Link, fromUID, cmdline string) {
 			_ = acl.Save()
 			l.NoticeFromService(fromUID, "Removed access on "+channel+" for "+tacct)
 
-		case "op":
-			if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-				l.NoticeFromService(fromUID, "No access on "+channel+".")
-				return
-			}
-			if cs := chans[toLower(channel)]; cs != nil {
-				l.FMode(cs.TS, channel, "+o", fromUID)
-			}
-
-		case "deop":
-			if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-				l.NoticeFromService(fromUID, "No access on "+channel+".")
-				return
-			}
-			if cs := chans[toLower(channel)]; cs != nil {
-				l.FMode(cs.TS, channel, "-o", fromUID)
-			}
-
-		case "voice":
-			if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-				l.NoticeFromService(fromUID, "No access on "+channel+".")
-				return
-			}
-			if cs := chans[toLower(channel)]; cs != nil {
-				l.FMode(cs.TS, channel, "+v", fromUID)
-			}
-
-		case "devoice":
-			if ok, _, _ := canControlChannel(l, fromUID, channel, 1); !ok {
-				l.NoticeFromService(fromUID, "No access on "+channel+".")
-				return
-			}
-			if cs := chans[toLower(channel)]; cs != nil {
-				l.FMode(cs.TS, channel, "-v", fromUID)
-			}
-
 		case "join":
 			if ok, _, _ := canControlChannel(l, fromUID, channel, 450); !ok {
 				l.NoticeFromService(fromUID, "Need level 450+ to JOIN.")
@@ -530,20 +711,10 @@ func handlePM(l *Link, fromUID, cmdline string) {
 			}
 			doPurge(l, channel)
 			l.NoticeFromService(fromUID, "Purged "+channel)
-
-		case "suspend":
-			if !opers[fromUID] || len(parts) < 4 {
-				l.NoticeFromService(fromUID, "Usage: suspend <#channel> <days> <reason>")
-				return
-			}
-			days, _ := strconv.Atoi(parts[2])
-			reason := strings.TrimSpace(strings.Join(parts[3:], " "))
-			doSuspendChannel(l, channel, days, reason)
-			l.NoticeFromService(fromUID, "Suspended "+channel+" for "+strconv.Itoa(days)+" day(s): "+reason)
 		}
 
 	default:
-		l.NoticeFromService(fromUID, "Unknown command: "+cmd)
+		l.NoticeFromService(fromUID, "Unknown command: "+cmd+". Try: help")
 	}
 }
 
@@ -560,19 +731,12 @@ func resolveAccountFromToken(tok string) string {
 // Admin ops
 
 func doPurge(l *Link, channel string) {
-	// leave channel
 	_ = l.SendRaw(":%s PART %s :Purged", l.Cfg.ServiceUID, channel)
-
-	// delete ACL + suspension
 	delete(acl.data, strings.ToLower(channel))
 	_ = acl.Save()
 	suspend.PurgeChan(channel)
 	_ = suspend.Save()
-
-	// forget cached TS/Seen
 	delete(chans, toLower(channel))
-
-	// best-effort save of remaining state
 	_ = qStore.Save()
 }
 
@@ -581,11 +745,23 @@ func doSuspendChannel(l *Link, channel string, days int, reason string) {
 		days = 1
 	}
 	until := time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
-	// mark channel
 	suspend.SuspendChan(channel, until, reason)
-	// suspend all accounts in its ACL (incl owner)
 	for _, e := range acl.List(channel) {
 		suspend.SuspendAcc(e.Account, until, "Suspended via "+channel+": "+reason)
 	}
 	_ = suspend.Save()
+}
+
+// NEW: suspend/unsuspend account helpers (global account suspension)
+func doSuspendAccount(account string, days int, reason string) {
+	if days < 1 {
+		days = 1
+	}
+	until := time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
+	suspend.SuspendAcc(strings.ToLower(account), until, reason)
+}
+
+func doUnsuspendAccount(account string) {
+	// Force-expire suspension (or use a real PurgeAcc if your store has one)
+	suspend.SuspendAcc(strings.ToLower(account), time.Now().Add(-1*time.Hour).Unix(), "unsuspended")
 }

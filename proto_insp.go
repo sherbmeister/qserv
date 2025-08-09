@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Insp4Handshake performs the InspIRCd v4 server handshake and introduces our
 // service client (Q) inside our own burst.
@@ -38,7 +41,7 @@ func Insp4Handshake(l *Link) error {
 
 	// v4 UID order (IMPORTANT):
 	// :<sid> UID <uid> <ts> <nick> <real-host> <displayed-host> <real-user> <displayed-user> <ip> <signon> <modes> :<real>
-	if err := l.SendRaw(":%s UID %s %d %s %s %s %s %s %s %d +Bk :%s",
+	if err := l.SendRaw(":%s UID %s %d %s %s %s %s %s %s %d + :%s",
 		l.Cfg.SID, // prefix
 		uid,       // <uid>
 		ts,        // <ts>
@@ -63,4 +66,41 @@ func Insp4Handshake(l *Link) error {
 	registerInspCoreHandlers(l)
 	registerServiceHandlers(l)
 	return nil
+}
+
+// registerInsp4Core wires protocol-critical handlers.
+func registerInsp4Core(l *Link) {
+	// Reply to InspIRCd-style: :<remotesid> PING <oursid>
+	l.Bus.On("PING", func(l *Link, m *Message) {
+		// Reply immediately; do not touch any heavy state.
+		if len(m.Params) == 1 && m.Prefix != "" {
+			srcSID := strings.TrimPrefix(m.Prefix, ":")
+			// PONG <oursid> <remotesid>
+			_ = l.SendRaw("PONG %s %s", srcSID, l.Cfg.SID)
+			return
+		}
+		// Token style fallback: PING :token
+		if m.Trailing != "" {
+			_ = l.SendRaw("PONG :%s", m.Trailing)
+		}
+	})
+
+	// Capture remote SID from SERVER line and start a defensive keepalive.
+	l.Bus.On("SERVER", func(l *Link, m *Message) {
+		if len(m.Params) >= 3 {
+			// m.Params[2] is remote SID in Insp4
+			remoteSID := m.Params[2]
+			startKeepalive(l, remoteSID)
+		}
+	})
+}
+
+func startKeepalive(l *Link, remoteSID string) {
+	t := time.NewTicker(45 * time.Second)
+	go func() {
+		for range t.C {
+			// This is extra safety; server will still PING us.
+			_ = l.SendRaw("PING %s %s", l.Cfg.SID, remoteSID)
+		}
+	}()
 }

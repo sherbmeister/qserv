@@ -1,19 +1,29 @@
 {
   "channels": {
+    "#core": {
+      "name": "#core",
+      "owner_uid": "jerry",
+      "created_ts": 1754759878
+    },
     "#feds": {
       "name": "#feds",
-      "owner_uid": "034AAAAAA",
-      "created_ts": 1754752218
+      "owner_uid": "sherby",
+      "created_ts": 1754757707
     },
     "#test2": {
       "name": "#test2",
-      "owner_uid": "radler2",
-      "created_ts": 1754755739
+      "owner_uid": "radler",
+      "created_ts": 1754757952
     },
     "#testing2": {
       "name": "#testing2",
-      "owner_uid": "sherby2",
-      "created_ts": 1754755100
+      "owner_uid": "Sherby",
+      "created_ts": 1754757814
+    },
+    "#testing3": {
+      "name": "#testing3",
+      "owner_uid": "radler",
+      "created_ts": 1754757825
     }
   }
 }

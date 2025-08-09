@@ -75,9 +75,9 @@ func LoadConfigFromFlagsAndEnv() Config {
 
 	// Q identity
 	qnick := flag.String("qnick", getenv("QSERV_QNICK", "Q"), "Q nick")
-	quser := flag.String("quser", getenv("QSERV_QUSER", "services"), "Q user")
-	qhost := flag.String("qhost", getenv("QSERV_QHOST", "services.local"), "Q host")
-	qreal := flag.String("qreal", getenv("QSERV_QREAL", "IRC Services"), "Q realname")
+	quser := flag.String("quser", getenv("QSERV_QUSER", "qserv"), "Q user")
+	qhost := flag.String("qhost", getenv("QSERV_QHOST", "services.emechnet.org"), "Q host")
+	qreal := flag.String("qreal", getenv("QSERV_QREAL", "The GO Q Bot"), "Q realname")
 
 	// Files
 	accPath := flag.String("accounts", getenv("QSERV_ACCOUNTS", "accounts.json"), "Accounts path")
@@ -201,14 +201,14 @@ func normalize(c *Config) {
 		c.SID = "042"
 	}
 	if c.ServerName == "" {
-		c.ServerName = "services.local"
+		c.ServerName = "services.emechnet.org"
 	}
 	// If no server-desc provided, fall back to QReal (nice default for banner)
 	if c.ServerDesc == "" {
 		if c.QReal != "" {
 			c.ServerDesc = c.QReal
 		} else {
-			c.ServerDesc = "IRC Services"
+			c.ServerDesc = "EmechNET IRC Services"
 		}
 	}
 	if c.ServiceUID == "" && c.SID != "" {
@@ -219,13 +219,13 @@ func normalize(c *Config) {
 		c.QNick = "Q"
 	}
 	if c.QUser == "" {
-		c.QUser = "services"
+		c.QUser = "qserv"
 	}
 	if c.QHost == "" {
-		c.QHost = "services.local"
+		c.QHost = "services.emechnet.org"
 	}
 	if c.QReal == "" {
-		c.QReal = "IRC Services"
+		c.QReal = "EmechNET IRC Services"
 	}
 }
 

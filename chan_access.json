@@ -1,0 +1,15 @@
+{
+  "#feds": {
+    "owner": "sherby",
+    "levels": {
+      "radler": 450,
+      "sherby": 500
+    }
+  },
+  "#test2": {
+    "owner": "radler",
+    "levels": {
+      "radler": 500
+    }
+  }
+}

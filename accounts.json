@@ -1,24 +1,19 @@
 {
   "accounts": {
-    "radler": {
-      "name": "",
-      "hash": null,
-      "created_ts": 0
+    "jerry": {
+      "name": "jerry",
+      "hash": "JDJhJDEwJFM5WkdINnU2S2I3ckxZWWNJa1hINmVsNFdPYkFxNUsvdHdUTG5HVEpoWnppNTJQWm1lNmVH",
+      "created_ts": 1754759845
     },
-    "radler2": {
-      "name": "radler2",
-      "hash": "JDJhJDEwJDFZMTRiNFZBWnRNTlBLR0ZpOUhoUXVHd3RtMHJ0di9Fd0UzYlZUek5SemJpa0pjalJJRHNl",
-      "created_ts": 1754754869
+    "radler": {
+      "name": "radler",
+      "hash": "JDJhJDEwJEkvU0xkaG1tNkh6M2F1bXIxNDRIVk9JWnR6UVh1Um11LlRWaHNyNkV1bXlRcHpqTDhVNHNt",
+      "created_ts": 1754757845
     },
     "sherby": {
-      "name": "",
-      "hash": null,
-      "created_ts": 0
-    },
-    "sherby2": {
-      "name": "sherby2",
-      "hash": "JDJhJDEwJEE5TjR4ODhpSEguR2NYcFhEWVh3N096OUVkY2lRYVFEZXJWcUVWVEdWR1I4dThIajMxaGJx",
-      "created_ts": 1754754842
+      "name": "sherby",
+      "hash": "JDJhJDEwJFljZy9Nd2JGN0NSd3FkQ1Mucm1UMy5WbEJ1WjlvRjg2Vml4VWVFNHE0eFBLVnNWbWo2NU82",
+      "created_ts": 1754757688
     }
   }
 }

@@ -27,15 +27,37 @@ func (l *Link) ServerMode(uid, modes string, args ...string) {
 	_ = l.SendRaw(line)
 }
 
-func (l *Link) ServiceJoinWithTS(channel string, chanTS int64, opSelf bool) {
-	uid := l.Cfg.ServiceUID
-	if uid == "" {
-		return
+// Join as Q, normalizing TS to seconds (never 0), then self-op via FMODE (server prefix).
+func (l *Link) ServiceJoinWithTS(channel string, ts int64, giveOp bool) {
+	// Normalize TS to seconds and ensure non-zero
+	tsSec := ts
+	if tsSec <= 0 {
+		tsSec = time.Now().Unix()
 	}
-	membid := time.Now().UnixNano() / 1e6
-	_ = l.SendRaw(":%s IJOIN %s %d", uid, channel, membid)
-	if opSelf {
-		_ = l.SendRaw(":%s FMODE %s %d +o %s", l.Cfg.SID, channel, chanTS, uid)
+	if tsSec > 1_000_000_000_000 { // looks like milliseconds
+		tsSec = tsSec / 1000
+	}
+
+	// Send IJOIN as the service user (UID prefix)
+	_ = l.SendRaw(":%s IJOIN %s %d", l.Cfg.ServiceUID, channel, tsSec)
+
+	// Cache/remember the TS so future FMODEs don’t use 0
+	key := toLower(channel)
+	cs := chans[key]
+	if cs == nil {
+		cs = &chanState{TS: tsSec, Seen: map[string]bool{}}
+		chans[key] = cs
+	} else if cs.TS == 0 {
+		cs.TS = tsSec
+	}
+	if cs.Seen == nil {
+		cs.Seen = map[string]bool{}
+	}
+	cs.Seen[l.Cfg.ServiceUID] = true
+
+	if giveOp {
+		// FMODE MUST use the channel TS (seconds) and come from the SERVER SID
+		_ = l.SendRaw(":%s FMODE %s %d +o %s", l.Cfg.SID, channel, cs.TS, l.Cfg.ServiceUID)
 	}
 }
 
@@ -58,7 +80,7 @@ func (l *Link) ChanMsg(channel, text string) {
 	if channel == "" || text == "" {
 		return
 	}
-	_ = l.SendRaw(":%s PRIVMSG %s :%s", l.Cfg.ServiceUID, channel, text)
+	_ = l.SendRaw(":%s NOTICE %s :%s", l.Cfg.ServiceUID, channel, text)
 }
 
 // ----- new: account + vhost helpers -----
@@ -98,28 +120,41 @@ var (
 	nick2uid = map[string]string{} // lower(nick) -> uid
 )
 
-func setNick(uid, nick string) {
-	nickMu.Lock()
-	defer nickMu.Unlock()
-	old := uid2nick[uid]
-	if old != "" {
-		delete(nick2uid, strings.ToLower(old))
-	}
-	uid2nick[uid] = nick
-	nick2uid[strings.ToLower(nick)] = uid
-}
-
-func delNick(uid string) {
-	nickMu.Lock()
-	defer nickMu.Unlock()
-	if old, ok := uid2nick[uid]; ok {
-		delete(nick2uid, strings.ToLower(old))
-	}
-	delete(uid2nick, uid)
-}
-
 func uidFromNick(nick string) string {
 	nickMu.RLock()
 	defer nickMu.RUnlock()
 	return nick2uid[strings.ToLower(nick)]
+}
+
+// User-triggered mode changes: have Q (service user) set the modes, not the server.
+func (l *Link) QChanMode(channel, modes string, targetUID string) {
+	if targetUID != "" {
+		_ = l.SendRaw(":%s MODE %s %s %s", l.Cfg.ServiceUID, channel, modes, targetUID)
+	} else {
+		_ = l.SendRaw(":%s MODE %s %s", l.Cfg.ServiceUID, channel, modes)
+	}
+}
+func requireLoginForChannel(l *Link, fromUID, channel string) (string, bool) {
+	acc := accDB.SessionAccount(fromUID)
+	if acc == "" {
+		l.ChanMsg(channel, "Login required. Use: /msg Q login <account> <password>")
+		return "", false
+	}
+	if suspend.IsAccSuspended(acc) {
+		l.ChanMsg(channel, "Your account is suspended and cannot use Q commands.")
+		return "", false
+	}
+	return acc, true
+}
+func getOr(slice []string, idx int, def string) string {
+	if idx >= 0 && idx < len(slice) {
+		return slice[idx]
+	}
+	return def
+}
+func (l *Link) SetAccountMetaOnly(uid, account string) {
+	if uid == "" || account == "" {
+		return
+	}
+	_ = l.SendRaw(":%s METADATA %s accountname :%s", l.Cfg.SID, uid, account)
 }
