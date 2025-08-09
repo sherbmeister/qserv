@@ -1,0 +1,14 @@
+{
+  "accounts": {
+    "radler": {
+      "passhash": "72c99071b8a4e3af064351d511e8134b9446adcf96d502df668d830b6e4f5d99",
+      "registered_at": 1754745000,
+      "last_login": 1754745372
+    },
+    "sherby": {
+      "passhash": "",
+      "registered_at": 0,
+      "last_login": 0
+    }
+  }
+}
